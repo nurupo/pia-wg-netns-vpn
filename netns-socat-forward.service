@@ -1,0 +1,15 @@
+# We could make this a socket activated service, but socat is so ridiculously
+# small that it's not worth the trouble, unless you need hundreds of these.
+[Unit]
+Description=Forward TCP connections made on host's 127.0.0.1:1234 to vpn-name network namespace's 127.0.0.1:1234
+After=network.target
+
+[Service]
+# Use this if you need to forward a UDP socket instead
+#ExecStart=/usr/bin/socat udp4-listen:1234,fork,reuseaddr,bind=127.0.0.1 exec:'ip netns exec vpn-name socat STDIO "udp-connect:127.0.0.1:1234"',nofork
+ExecStart=/usr/bin/socat tcp4-listen:1234,fork,reuseaddr,bind=127.0.0.1 exec:'ip netns exec vpn-name socat STDIO "tcp-connect:127.0.0.1:1234"',nofork
+Restart=always
+SyslogIdentifier=netns-socat-forward
+
+[Install]
+WantedBy=default.target

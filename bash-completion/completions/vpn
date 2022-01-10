@@ -1,0 +1,43 @@
+_vpn()
+{
+    local cur prev words cword
+    _init_completion || return
+
+#    echo "cur: ${cur[@]} | prev: ${prev[@]} | words: ${words[@]} | cword: ${cword[@]}"
+
+    if ((cword == 1)); then
+        COMPREPLY=($(compgen -W 'regions up down list stat exec' -- "$cur"))
+        return
+    fi
+
+    local command=${words[1]}
+
+    if ((cword == 2)); then
+        case $command in
+            down | stat | exec)
+                COMPREPLY=($(compgen -W "$(vpn --help 2>&1 > /dev/null && VPN_BASH_COMPLETION=1 vpn bash-completion-list)" -- "$cur"))
+                ;;
+        esac
+        return
+    fi
+
+    if ((cword == 3)); then
+        case $command in
+            up)
+                COMPREPLY=($(compgen -W "$(vpn --help 2>&1 > /dev/null && VPN_BASH_COMPLETION=1 vpn bash-completion-regions)" -- "$cur"))
+                return
+                ;;
+        esac
+    fi
+
+    if ((cword >= 3)); then
+        case $command in
+            exec)
+                for ((i = 3; i <= cword; i++)); do
+                    _command_offset $i
+                    return
+                done
+                ;;
+        esac
+    fi
+} && complete -F _vpn vpn

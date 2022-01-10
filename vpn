@@ -1,0 +1,573 @@
+#!/usr/bin/env bash
+# shellcheck enable=all disable=SC2250,SC2312
+
+# vpn - creates a network namespace with a PIA WireGuard VPN connection in it
+#
+# Copyright (C) 2021-2022 Maxim Biro <nurupo.contributions@gmail.com>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License version 3,
+# as published by the Free Software Foundation.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+set -euo pipefail
+
+# User settings
+
+readonly VPN_ROOT_DIR="/var/lib/vpn"
+readonly PIA_SERVERS_LIST_CACHE_SECONDS=$((60*60*24))  # 24 hours
+readonly PIA_TOKEN_CACHE_SECONDS=$((60*60*24))         # 24 hours
+
+
+# functions set these global variables as the result
+# TODO(nurupo): maybe rework the code to have functions return the values
+#               instead of setting global variables?
+PIA_SERVERS_JSON=""
+PIA_TOKEN=""
+PIA_WG_SERVER_INFO_JSON=""
+
+readonly PIA_SERVERS_JSON_WG_SELECTOR=".regions[] | select(.offline == false) | select(.servers.wg) | "
+readonly PIA_SERVERS_LIST_CACHE="$VPN_ROOT_DIR/public/pia_servers_v6.json"
+
+get_pia_servers_json() {
+    # Try using the cached list
+    if [[ -f "$PIA_SERVERS_LIST_CACHE" ]] && \
+       (( $(date +"%s") - $(stat -c "%Y" -- "$PIA_SERVERS_LIST_CACHE") < PIA_SERVERS_LIST_CACHE_SECONDS )); then
+        echo "Using cached server list"
+        PIA_SERVERS_JSON="$(cat "$PIA_SERVERS_LIST_CACHE")"
+        return
+    fi
+
+    set +e
+    if ! PIA_SERVERS_JSON="$(curl -s -G "https://serverlist.piaservers.net/vpninfo/servers/v6" | head -1)"
+    then
+        echo "Error: Couldn't get a list of the PIA servers. Are you connected to the Internet? Is the DNS working?"
+        exit 1
+    fi
+    set -e
+    touch "$PIA_SERVERS_LIST_CACHE"
+    chmod 604 "$PIA_SERVERS_LIST_CACHE"
+    echo "$PIA_SERVERS_JSON" > "$PIA_SERVERS_LIST_CACHE"
+}
+
+print_pia_regions() {
+    get_pia_servers_json
+    local MAX_NAME_LEN MAX_ID_LEN
+    MAX_NAME_LEN="$(echo "$PIA_SERVERS_JSON" | jq -r "$PIA_SERVERS_JSON_WG_SELECTOR"'[.name | length] | @tsv' | sort -n | tail -n1)"
+    MAX_ID_LEN="$(echo "$PIA_SERVERS_JSON" | jq -r "$PIA_SERVERS_JSON_WG_SELECTOR"'[.id | length] | @tsv' | sort -n | tail -n1)"
+    printf "%-${MAX_NAME_LEN}s | %s\n" "Region" "Id"
+    # shellcheck disable=SC2046
+    printf '=%.0s' $(eval "echo {1..$MAX_NAME_LEN}")
+    printf '=|='
+    # shellcheck disable=SC2046
+    printf '=%.0s' $(eval "echo {1..$MAX_ID_LEN}")
+    printf '\n'
+    echo "$PIA_SERVERS_JSON" | jq -r "$PIA_SERVERS_JSON_WG_SELECTOR"'[.id, .name] | @tsv' | \
+                               while read -r ID NAME ; do printf "%-${MAX_NAME_LEN}s | %s\n" "$NAME" "$ID" ; done | sort -h -k1
+}
+
+bash_completion_regions() {
+    [[ ! -f "$PIA_SERVERS_LIST_CACHE" ]] && exit 1
+    jq -r "$PIA_SERVERS_JSON_WG_SELECTOR"'[.id] | @tsv' < "$PIA_SERVERS_LIST_CACHE"
+}
+
+get_pia_token() {
+    # Try using the cached token
+    local CACHE_TOKEN="$VPN_ROOT_DIR/secret/token"
+    if [[ -f "$CACHE_TOKEN" ]] && \
+       (( $(date +"%s") - $(stat -c "%Y" -- "$CACHE_TOKEN") < PIA_TOKEN_CACHE_SECONDS )); then
+        echo "Using cached auth token"
+        PIA_TOKEN="$(cat "$CACHE_TOKEN")"
+        return
+    fi
+
+    local PIA_AUTH_FILE="$VPN_ROOT_DIR/secret/pia_auth.sh"
+    if [[ ! -f "$PIA_AUTH_FILE" ]]
+    then
+        echo "Error: \"$PIA_AUTH_FILE\" doesn't exist. Create it and set PIA_USER and PIA_PASS in it."
+        exit 1
+    fi
+    . "$PIA_AUTH_FILE"
+    if [[ -z "${PIA_USER:-}" ]] || [[ -z "${PIA_PASS:-}" ]]
+    then
+        echo "Error: \"$PIA_AUTH_FILE\" didn't set PIA_USER and PIA_PASS."
+        exit 1
+    fi
+
+    local PIA_TOKEN_JSON
+    PIA_TOKEN_JSON="$(curl -s -u "$PIA_USER:$PIA_PASS" "https://www.privateinternetaccess.com/gtoken/generateToken")"
+    if [[ "$(echo "$PIA_TOKEN_JSON" | jq -r '.status')" != "OK" ]]
+    then
+        echo "Error: Failed to get PIA Token using the provided username and password."
+        echo "Server response:"
+        echo "$PIA_TOKEN_JSON" | jq -r '.'
+        exit 1
+    fi
+    PIA_TOKEN="$(echo "$PIA_TOKEN_JSON" | jq -r '.token')"
+
+    echo "$PIA_TOKEN" > "$CACHE_TOKEN"
+}
+
+get_pia_wg_server_info_json() {
+    local PIA_REGION_ID="$1"
+    local WG_PUB_KEY="$2"
+
+    local PIA_WG_SERVER_JSON
+    PIA_WG_SERVER_JSON="$(echo "$PIA_SERVERS_JSON" | jq -r "$PIA_SERVERS_JSON_WG_SELECTOR""select(.id == \"$PIA_REGION_ID\")")"
+
+    if [[ -z "$PIA_WG_SERVER_JSON" ]]
+    then
+        echo "Error: No such PIA region id \"$PIA_REGION_ID\""
+        exit 1
+    fi
+
+    # select a random WireGuard server
+    # (not a secure random function and % makes it not an uniform distribution,
+    # but for our purposes it's good enough)
+    local RNG="$RANDOM"
+    local PIA_WG_SERVER_HOSTNAME PIA_WG_SERVER_IP
+    PIA_WG_SERVER_HOSTNAME="$(echo "$PIA_WG_SERVER_JSON" | jq --argjson rng "$RNG" -r '.servers.wg | .[$rng % length].cn')"
+    PIA_WG_SERVER_IP="$(echo "$PIA_WG_SERVER_JSON" | jq --argjson rng "$RNG" -r '.servers.wg | .[$rng % length].ip')"
+
+    # select a random WireGuard port
+    # (same disclaimer)
+    local PIA_WG_SERVER_PORT
+    PIA_WG_SERVER_PORT="$(echo "$PIA_SERVERS_JSON" | jq --argjson rng "$RANDOM" -r '.groups.wg[0].ports | .[$rng % length]')"
+
+    get_pia_token
+
+    local PIA_CERT_FILE="$VPN_ROOT_DIR/secret/pia_ca.rsa.4096.crt"
+    if [[ ! -f "$PIA_CERT_FILE" ]]
+    then
+        echo "Error: $PIA_CERT_FILE doesn't exist."
+        exit 1
+    fi
+
+    PIA_WG_SERVER_INFO_JSON="$(curl -s \
+                                    -G \
+                                    --connect-to "$PIA_WG_SERVER_HOSTNAME::$PIA_WG_SERVER_IP:" \
+                                    --capath ./intentionally-invalid-path \
+                                    --cacert "$PIA_CERT_FILE" \
+                                    --data-urlencode "pt=$PIA_TOKEN" \
+                                    --data-urlencode "pubkey=$WG_PUB_KEY" \
+                                    "https://$PIA_WG_SERVER_HOSTNAME:$PIA_WG_SERVER_PORT/addKey")"
+    if [[ "$(echo "$PIA_WG_SERVER_INFO_JSON" | jq -r '.status')" != "OK" ]]
+    then
+        echo "Error: Failed to get PIA WireGuard server info."
+        echo "Server response:"
+        echo "$PIA_WG_SERVER_INFO_JSON" | jq -r '.'
+        exit 1
+    fi
+}
+
+validate_name() {
+    local NAME="$1"
+    if [[ "$NAME" =~ [^0-9a-zA-Z_-]+ ]]
+    then
+        echo "Error: Invalid argument \"$NAME\". Must contain only letters, numbers, dash or underscore."
+        exit 1
+    fi
+}
+
+ns_exists_and_is_ours() {
+    local NS_NAME="$1"
+    if [[ ! -f "$VPN_ROOT_DIR/public/names/$NS_NAME" ]]
+    then
+        echo "Error: No such VPN name \"$NS_NAME\"."
+        exit 1
+    fi
+}
+
+down() {
+    if [[ -z "${1:-}" ]]
+    then
+        echo "Error: No VPN name provided."
+        exit 1
+    fi
+
+    local NS_NAME="$1"
+    local WG_NAME="$NS_NAME"
+
+    validate_name "$NS_NAME"
+    validate_name "$WG_NAME"
+
+    ns_exists_and_is_ours "$NS_NAME"
+
+    # Check for still running in the namespace processes
+    local PIDS PIDS_RET
+    set +e
+    PIDS="$(ip netns pids "$NS_NAME")"
+    PIDS_RET="$?"
+    set -e
+    if [[ "$PIDS_RET" -eq "0" ]] && [[ -n "$PIDS" ]]
+    then
+        echo "The following processes are still running:"
+        while IFS= read -r PID
+        do
+            echo "$PID  $(ps -o command= -p "$PID")"
+        done <<< "$PIDS"
+        echo
+        while true
+        do
+            read -rp "Continue anyway (y/n)? " confirm
+            if [[ "$confirm" =~ ^[yY]$ ]]
+            then
+                break
+            elif [[ "$confirm" =~ ^[nN]$ ]]
+            then
+                echo "Canceled."
+                exit 0
+            fi
+        done
+    fi
+
+    echo "Deleting WireGuard interface \"$WG_NAME\"..."
+    ip netns exec "$NS_NAME" ip link del "$WG_NAME" || true
+    echo "Deleting namespace \"$NS_NAME\"..."
+    ip netns del "$NS_NAME" || true
+    echo "Deleting namespace directory..."
+    rm -r "/etc/netns/$NS_NAME" || true
+    rm "$VPN_ROOT_DIR/public/names/$NS_NAME" || true
+    echo "Done!"
+}
+
+up() {
+    if [[ -z "${1:-}" ]]
+    then
+        echo "Error: No VPN name provided."
+        usage
+        exit 1
+    fi
+
+    if [[ -z "${2:-}" ]]
+    then
+        echo "Error: No VPN region id provided."
+        usage
+        exit 1
+    fi
+
+    local NS_NAME="$1"
+    local WG_NAME="$NS_NAME"
+    local PIA_REGION_ID="$2"
+
+    validate_name "$NS_NAME"
+    validate_name "$WG_NAME"
+
+    if [[ -f "$VPN_ROOT_DIR/public/names/$NS_NAME" ]]
+    then
+        echo "Error: VPN \"$NS_NAME\" already exists."
+        exit 1
+    fi
+    local FOUND_NS="false"
+    while read -r NETNS
+    do
+        if [[ "$NETNS" == "$(basename -- "$NS_NAME")" ]]
+        then
+           FOUND_NS="true"
+           break
+        fi
+    done < <(ip -json netns list | jq -r '.[] | .name')
+    if [[ "$FOUND_NS" == "true" ]]
+    then
+        echo "Error: Network namespace \"$NS_NAME\" already exists."
+        exit 1
+    fi
+
+    echo "Generating keys..."
+    local WG_SEC_KEY WG_PUB_KEY
+    WG_SEC_KEY="$(wg genkey)"
+    WG_PUB_KEY="$(echo "$WG_SEC_KEY" | wg pubkey)"
+
+    echo "Getting VPN server list..."
+    get_pia_servers_json
+
+    echo "Getting WireGuard information for a random server in \"$PIA_REGION_ID\" region..."
+    get_pia_wg_server_info_json "$PIA_REGION_ID" "$WG_PUB_KEY"
+
+    local PIA_WG_PEER_IP PIA_WG_SERVER_IP PIA_WG_SERVER_PORT PIA_WG_SERVER_KEY PIA_DNS_SERVER_1 PIA_DNS_SERVER_2
+    PIA_WG_PEER_IP="$(echo "$PIA_WG_SERVER_INFO_JSON" | jq -r '.peer_ip')"
+    PIA_WG_SERVER_IP="$(echo "$PIA_WG_SERVER_INFO_JSON" | jq -r '.server_ip')"
+    PIA_WG_SERVER_PORT="$(echo "$PIA_WG_SERVER_INFO_JSON" | jq -r '.server_port')"
+    PIA_WG_SERVER_KEY="$(echo "$PIA_WG_SERVER_INFO_JSON" | jq -r '.server_key')"
+    PIA_DNS_SERVER_1="$(echo "$PIA_WG_SERVER_INFO_JSON" | jq -r '.dns_servers[0]')"
+    PIA_DNS_SERVER_2="$(echo "$PIA_WG_SERVER_INFO_JSON" | jq -r '.dns_servers[1]')"
+
+    echo "Creating namespace \"$NS_NAME\"..."
+    ip netns add "$NS_NAME"
+    touch "$VPN_ROOT_DIR/public/names/$NS_NAME"
+    chmod 604 "$VPN_ROOT_DIR/public/names/$NS_NAME"
+
+    # shellcheck disable=SC2064
+    trap "down $NS_NAME; exit" INT TERM EXIT
+
+    echo "Setting up IPv4 loopback..."
+    ip -n "$NS_NAME" link set lo up
+
+    echo "Creating WireGuard interface \"$WG_NAME\"..."
+    ip link add "$WG_NAME" type wireguard
+    ip link set "$WG_NAME" netns "$NS_NAME"
+    ip netns exec "$NS_NAME" wg set "$WG_NAME" \
+        private-key <(echo "$WG_SEC_KEY") \
+        peer "$PIA_WG_SERVER_KEY" \
+        endpoint "$PIA_WG_SERVER_IP:$PIA_WG_SERVER_PORT" \
+        persistent-keepalive 25 \
+        allowed-ips "0.0.0.0/0"
+    ip -n "$NS_NAME" addr add "$PIA_WG_PEER_IP" dev "$WG_NAME"
+    ip -n "$NS_NAME" link set "$WG_NAME" up
+    ip -n "$NS_NAME" route add default dev "$WG_NAME"
+
+    echo "Setting up DNS..."
+    mkdir -p "/etc/netns/$NS_NAME"
+    echo "nameserver $PIA_DNS_SERVER_1
+nameserver $PIA_DNS_SERVER_2
+" > "/etc/netns/$NS_NAME/resolv.conf"
+
+    trap - INT TERM EXIT
+
+    echo "Done!"
+    echo
+
+    sleep 1
+
+    echo "Info..."
+    echo
+
+#    ip -n "$NS_NAME" route
+#    ip -n "$NS_NAME" a
+    ip netns exec "$NS_NAME" wg show
+
+#    echo
+#    local VPN_IP="$(ip netns exec "$NS_NAME" curl -s icanhazip.com)"
+#    echo "IP: $VPN_IP"
+#    geoiplookup "$VPN_IP"
+#    whois -h whois.cymru.com " -v $VPN_IP"
+}
+
+# has to be ran as `sudo -E` in order to work properly
+exec_() {
+    local NS_NAME="$1"
+    shift
+
+    validate_name "$NS_NAME"
+
+    ns_exists_and_is_ours "$NS_NAME"
+
+    if [[ "$#" == "0" ]]
+    then
+        echo "Error: No program name provided."
+        exit 1
+    fi
+
+    # hide SUDO_ env vars, if any, as some programs don't like being called via
+    # sudo (e.g. flatpak)
+    local UNSET_SUDO_VARS
+    UNSET_SUDO_VARS="$(sudo -E -u \#"${SUDO_UID:-$(id -u)}" -g \#"${SUDO_GID:-$(id -g)}" \
+                       env | grep '^SUDO_' | sed 's/=/\t/g' | awk '{ print "-u " $1 }' | tr '\n' ' ')"
+    # shellcheck disable=SC2086
+    ip netns exec "$NS_NAME" sudo -E -u \#"${SUDO_UID:-$(id -u)}" -g \#"${SUDO_GID:-$(id -g)}" -- \
+                             env $UNSET_SUDO_VARS -u VPN_NO_INFO_ON_SUDO -- "$@"
+}
+
+stat_() {
+    local NS_NAME="$1"
+    local WG_NAME="$NS_NAME"
+
+    validate_name "$NS_NAME"
+    validate_name "$WG_NAME"
+
+    ns_exists_and_is_ours "$NS_NAME"
+
+    local NAME_MODIFIED_SECONDS SECONDS_ELAPSED
+    NAME_MODIFIED_SECONDS=$(stat -c "%Y" -- "$VPN_ROOT_DIR/public/names/$NS_NAME")
+    SECONDS_ELAPSED=$(( $(date +%s) - NAME_MODIFIED_SECONDS ))
+    local D=$((SECONDS_ELAPSED / (60*60*24)))
+    local H=$((SECONDS_ELAPSED % (60*60*24) / (60*60)))
+    local M=$((SECONDS_ELAPSED % (60*60) / 60))
+    local S=$((SECONDS_ELAPSED % 60))
+    printf "Up for %01d days %02d hours %02d min %02d sec, since %s\n" \
+           "$D" "$H" "$M" "$S" "$(date +"%Y-%m-%d %H:%M:%S %z" -d @"$NAME_MODIFIED_SECONDS")"
+
+    ip netns exec "$NS_NAME" wg show "$WG_NAME"
+}
+
+list() {
+    # assumes cleanup_names was called beforehand
+    for NETNS_NAME in "$VPN_ROOT_DIR"/public/names/*
+    do
+        [[ ! -f "$NETNS_NAME" ]] && continue
+        basename -- "$NETNS_NAME"
+    done
+}
+
+# non-privileged version of the list function
+bash_completion_list() {
+    while read -r NETNS
+    do
+        local NETNS_NAME
+        for NETNS_NAME in "$VPN_ROOT_DIR"/public/names/*
+        do
+            if [[ ! -f "$NETNS_NAME" ]]
+            then
+                continue
+            fi
+            if [[ "$NETNS" == "$(basename -- "$NETNS_NAME")" ]]
+            then
+               echo "$NETNS"
+            fi
+        done
+    done < <(ip -json netns list | jq -r '.[] | .name')
+}
+
+cleanup_names() {
+    local NETNS_NAME
+    for NETNS_NAME in "$VPN_ROOT_DIR"/public/names/*
+    do
+        if [[ ! -f "$NETNS_NAME" ]]
+        then
+            continue
+        fi
+        local FOUND="0"
+        while read -r NETNS
+        do
+            if [[ "$(basename -- "$NETNS_NAME")" == "$NETNS" ]]
+            then
+                FOUND="1"
+                break
+            fi
+        done < <(ip -json netns list | jq -r '.[] | .name')
+        if [[ "$FOUND" == "0" ]]
+        then
+            rm "$NETNS_NAME"
+        fi
+    done
+}
+
+auto_sudo() {
+    local SUDO_ARGS="$1"
+    shift
+
+    # Print only when a user runs us via sudo and special flags are required
+    if [[ -z "${VPN_NO_INFO_ON_SUDO:-}" ]] && [[ -n "${SUDO_COMMAND:-}" ]] && [[ -n "$SUDO_ARGS" ]]
+    then
+        echo "Info: Make sure to run sudo with \"$SUDO_ARGS\" flag(s) when running \"$0 $1\" command."
+    fi
+
+    if [[ "$(id -u)" != "0" ]]
+    then
+        # shellcheck disable=SC2086
+        sudo $SUDO_ARGS VPN_NO_INFO_ON_SUDO=1 "$BASH" -- "$0" "$@"
+        exit
+    fi
+}
+
+usage() {
+    local PROGRAM
+    PROGRAM=$(basename -- "$0")
+    echo "Usage: [sudo   ] $PROGRAM regions                        list available VPN regions"
+    echo "       [sudo   ] $PROGRAM up <name> <region-id>          create VPN <name> connected to <region-id> region"
+    echo "       [sudo   ] $PROGRAM down <name>                    delete VPN <name>"
+    echo "       [sudo   ] $PROGRAM list                           list created VPNs"
+    echo "       [sudo   ] $PROGRAM stat <name>                    show information for VPN <name>"
+    echo "       [sudo -E] $PROGRAM exec <name> <program> [args]   run a program in VPN <name>'s network namespace as the current user"
+    echo
+    echo "It's preferred that you don't call the script with \"sudo\", the" \
+         "script will auto-sudo with the correct flags on its own." | fold -sw 80
+    echo
+    echo "A bit counter-intuitively, \"sudo -E $PROGRAM exec\" will run the" \
+         "program as the user who invoked sudo, not necessarily as the root" \
+         "user. Run it as \"sudo sudo $PROGRAM exec\" if you want to run it as root." | fold -sw 80
+}
+
+help() {
+    echo "$(basename -- "$0") - creates a network namespace with a PIA WireGuard VPN connection in it." | fold -sw 80
+    echo
+    usage
+}
+
+for PROGRAM in "jq" "curl" "wg" "awk"
+do
+    if [[ ! -x "$(command -v "$PROGRAM")" ]]
+    then
+        echo "Error: $PROGRAM is not installed."
+        exit 1
+    fi
+done
+
+if ! lsmod | awk '{ print $1 }' | grep -q '^wireguard$'
+then
+    echo "Error: WireGuard kernel module is not present."
+    exit 1
+fi
+
+if [[ "$#" -lt "1" ]]
+then
+    echo "Error: No command provided."
+    usage
+    exit 1
+fi
+
+readonly COMMAND="$1"
+
+# Handle non-privileged bash-completion commands
+if [[ -n "${VPN_BASH_COMPLETION:-}" ]]
+then
+    case "$COMMAND" in
+        bash-completion-list)
+            bash_completion_list ;;
+        bash-completion-regions)
+            bash_completion_regions ;;
+        *)
+            exit 1 ;;
+    esac
+    exit 0
+fi
+
+# Check if the command is supported and auto-sudo if so
+case "$COMMAND" in
+    exec)
+        auto_sudo "-E" "$@" ;;
+    up|down|regions|stat|list)
+        auto_sudo "" "$@" ;;
+    --help|-h)
+        help; exit 0 ;;
+    *)
+        echo "Error: Unknown command \"$COMMAND\"."
+        echo
+        usage
+        exit 1 ;;
+esac
+
+shift
+
+# At this point we run as root
+
+# Make sure these exist and they are secured
+mkdir -p "$VPN_ROOT_DIR"
+chmod 605 "$VPN_ROOT_DIR"
+mkdir -p "$VPN_ROOT_DIR/public/names"
+chmod 605 -R "$VPN_ROOT_DIR/public"
+mkdir -p "$VPN_ROOT_DIR/secret"
+chmod 600 "$VPN_ROOT_DIR/secret"
+chown root:root -R "$VPN_ROOT_DIR"
+
+# Cleanup our list of names in case it's out of sync: the system got rebooted,
+# user manually deleted our netns instead of using the down command, etc.
+cleanup_names
+
+# Do the command
+# shellcheck disable=SC2249
+case "$COMMAND" in
+    up) up "$@" ;;
+    down) down "$@" ;;
+    regions) print_pia_regions "$@" ;;
+    exec) exec_ "$@" ;;
+    stat) stat_ "$@" ;;
+    list) list "$@" ;;
+esac
