@@ -500,12 +500,6 @@ do
     fi
 done
 
-if ! lsmod | awk '{ print $1 }' | grep -q '^wireguard$'
-then
-    echo "Error: WireGuard kernel module is not present."
-    exit 1
-fi
-
 if [[ "$#" -lt "1" ]]
 then
     echo "Error: No command provided."
