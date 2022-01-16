@@ -7,7 +7,7 @@ Supports Private Internet Access (PIA) VPN only, but can be (relatively) easily 
 This is just something I wrote for myself that I'm sharing on the off chance someone finds it useful.
 I have no plans on supporting any other VPN provider for now, but if in the future I change which VPN service I use, I might update the script and rename the repo appropriately.
 
-## FAQ
+## Why
 
 ### Why run a VPN in a network namespace?
 
@@ -27,19 +27,6 @@ You might be wondering why I don't just use [`pia-foss/manual-connections`](http
 The issue is that all these scripts use [`wg-quick`](https://manpages.debian.org/unstable/wireguard-tools/wg-quick.8.en.html), which doesn't support creating WireGuard connections in a separate namespace and does a lot of unnecessary for us stuff.
 
 To create a WireGuard connection in a separate namespace, [you want to create the wg interface in the init namespace and then move it into a separate namespace, that way it remembers that it was created in the init namespace and routes traffic though it](https://www.wireguard.com/netns/).
-
-### How to access a web server running in a network namespace / how to forward a port?
-
-You can use the provided `netns-socat-forward.service` as an example of how to forward connections made on host's 127.0.0.1:1234 to 127.0.0.1:1234 inside the network namespace.
-
-Edit `netns-socat-forward.service` for your needs: host ip port, netns ip port, tcp or udp, vpn name, rename the file, change syslog identifier, etc., and run:
-
-```bash
-sudo install -o root -g root -m 644 netns-socat-forward.service /etc/systemd/system/netns-socat-forward.service
-sudo systemctl daemon-reload
-sudo systemctl start netns-socat-forward.service
-sudo systemctl status netns-socat-forward.service
-```
 
 # Setup
 
@@ -83,7 +70,51 @@ who invoked sudo, not necessarily as the root user. Run it as "sudo sudo vpn
 exec" if you want to run it as root.
 ```
 
-Just for fun, if you want to get behind 7 proxies, you can do it like this:
+## FAQ
+
+### How to access a web server running in a network namespace / how to forward a port?
+
+You can use the provided `netns-socat-forward.service` as an example of how to forward connections made on host's 127.0.0.1:1234 to 127.0.0.1:1234 inside the network namespace.
+
+Edit `netns-socat-forward.service` for your needs: host ip port, netns ip port, tcp or udp, vpn name, rename the file, change syslog identifier, etc., and run:
+
+```bash
+sudo install -o root -g root -m 644 netns-socat-forward.service /etc/systemd/system/netns-socat-forward.service
+sudo systemctl daemon-reload
+sudo systemctl start netns-socat-forward.service
+sudo systemctl status netns-socat-forward.service
+```
+
+### How to make a desktop shortcut run a program in a VPN?
+
+Because `vpn exec` prompts for the sudo password, you can't simply use it in a desktop shortcut as you wouldn't get the password prompt.
+One way to get such a prompt is to use `pkexec`, however it doesn't preserve environment variables, which is needed in order to run GUI applications.
+
+This is where the `pkexec-E` helper script comes in handy -- it makes `pkexec` preserve the environment as if `sudo -E` was called.
+
+Install the helper script:
+
+```bash
+sudo install -o root -g root -m 755 pkexec-E /usr/local/bin/pkexec-E
+```
+
+Then, if your desktop shortcut runs, for example, `app %U`, you can modify it to run the following instead:
+
+```
+/usr/local/bin/pkexec-E /usr/local/bin/vpn exec vpn-name app %U
+```
+
+That assumes that the VPN is already up, otherwise `vpn exec` would error and the `app` wouldn't run.
+
+If you want to also bring the VPN up at the same time, just in case it's not up already, you can use the following instead:
+
+```
+/usr/local/bin/pkexec-E /bin/sh -c '/usr/local/bin/vpn up vpn-name region-id ; /usr/local/bin/vpn exec vpn-name app "$@"' -- %U
+```
+
+### How to get behind 7 proxies?
+
+You can do so like this:
 
 ```bash
 /bin/bash
@@ -104,14 +135,14 @@ vpn up vpn7 region7 && trap "vpn down vpn7" EXIT && vpn exec vpn7 /bin/bash
 # do your stuff here
 ```
 
-Then just logout 8 times, to get out of each bash session and trigger the set traps.
+Then, after you are done, just `logout` 8 times, to get out of each bash session and trigger the set traps.
 
-When nesting past a few VPNs the connection becomes rather unstable, so you might want to do less than 7 nestings.
+Note thatwhen nesting past a few VPNs the connection becomes rather unstable, you might lose connection way before you get behind 7 proxies, so you might want to limit yourself it to just a few of them.
 
-Note that the following will NOT work [because of this](https://serverfault.com/a/961592), i.e. you need to keep a process in a network namespace for the nested namespaces to work, like what all these bash processes in the snippet above did:
+Also note that the following will NOT work [because of this](https://serverfault.com/a/961592), i.e. you need to keep a process in a network namespace for the nested namespaces to work, like what all these bash processes in the snippet above did:
 
 ```bash
-# you would think this would work but it doesn't
+# you might think this would work but it doesn't
 vpn up vpn1 region1
 vpn exec vpn1 vpn up vpn2 region2
 vpn exec vpn2 vpn up vpn3 region3

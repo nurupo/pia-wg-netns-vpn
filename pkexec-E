@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# shellcheck enable=all disable=SC2250,SC2312
+
+# pkexec-E - runs pkexec preserving the environment, mimicking sudo -E
+#
+# Copyright (C) 2021-2022 Maxim Biro <nurupo.contributions@gmail.com>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License version 3,
+# as published by the Free Software Foundation.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+set -euo pipefail
+
+declare -a VARS
+for VAR in $(env | sed 's/=/\t/g' | awk '{ print $1 }' | tr '\n' ' '); do
+  VARS+=("$VAR=${!VAR}")
+done
+pkexec env -u PKEXEC_UID "SUDO_USER=$USER" "SUDO_UID=$(id -u)" "SUDO_GID=$(id -g)" "${VARS[@]}" "$@"
