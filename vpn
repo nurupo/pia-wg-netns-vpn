@@ -189,6 +189,7 @@ down() {
     if [[ -z "${1:-}" ]]
     then
         echo "Error: No VPN name provided."
+        usage
         exit 1
     fi
 
@@ -367,6 +368,7 @@ exec_() {
     if [[ "$#" == "0" ]]
     then
         echo "Error: No program name provided."
+        usage
         exit 1
     fi
 
