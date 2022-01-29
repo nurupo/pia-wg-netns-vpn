@@ -352,12 +352,17 @@ nameserver $PIA_DNS_SERVER_2
 
 # has to be ran as `sudo -E` in order to work properly
 exec_() {
+    if [[ -z "${1:-}" ]]
+    then
+        echo "Error: No VPN name provided."
+        usage
+        exit 1
+    fi
     local NS_NAME="$1"
-    shift
-
     validate_name "$NS_NAME"
-
     ns_exists_and_is_ours "$NS_NAME"
+
+    shift
 
     if [[ "$#" == "0" ]]
     then
@@ -376,6 +381,13 @@ exec_() {
 }
 
 stat_() {
+    if [[ -z "${1:-}" ]]
+    then
+        echo "Error: No VPN name provided."
+        usage
+        exit 1
+    fi
+
     local NS_NAME="$1"
     local WG_NAME="$NS_NAME"
 
