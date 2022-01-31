@@ -109,8 +109,10 @@ That assumes that the VPN is already up, otherwise `vpn exec` would error and th
 If you want to also bring the VPN up at the same time, just in case it's not up already, you can use the following instead:
 
 ```
-/usr/local/bin/pkexec-E /bin/sh -c '/usr/local/bin/vpn up vpn-name region-id ; /usr/local/bin/vpn exec vpn-name app "$@"' -- %U
+/usr/local/bin/pkexec-E /bin/sh -c '/usr/local/bin/vpn up vpn-name region-id > /dev/null ; /usr/local/bin/vpn exec vpn-name app "$@"' -- %U
 ```
+
+`> /dev/null` is needed because there is no tty when the vpn script is run, making echo commands fail to write, killing the script.
 
 ### How to get behind 7 proxies?
 
