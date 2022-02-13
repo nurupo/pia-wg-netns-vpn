@@ -35,7 +35,7 @@ To create a WireGuard connection in a separate namespace, [you want to create th
 sudo install -o root -g root -m 755 -D vpn /usr/local/bin/vpn
 sudo install -o root -g root -m 755 -D bash-completion/completions/vpn /usr/local/share/bash-completion/completions/vpn
 # install deps (Debian/Ubuntu)
-sudo apt-get install curl gawk jq wireguard-tools
+sudo apt-get install curl mawk jq wireguard-tools
 # this will create directory structure under /var/lib/vpn and prompt about missing deps
 vpn regions
 # setup other things
