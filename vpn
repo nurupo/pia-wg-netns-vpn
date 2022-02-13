@@ -372,14 +372,21 @@ exec_() {
         exit 1
     fi
 
-    # hide SUDO_ env vars, if any, as some programs don't like being called via
-    # sudo (e.g. flatpak)
-    local UNSET_SUDO_VARS
-    UNSET_SUDO_VARS="$(sudo -E -u \#"${SUDO_UID:-$(id -u)}" -g \#"${SUDO_GID:-$(id -g)}" \
-                       env | grep '^SUDO_' | sed 's/=/\t/g' | awk '{ print "-u " $1 }' | tr '\n' ' ')"
-    # shellcheck disable=SC2086
-    ip netns exec "$NS_NAME" sudo -E -u \#"${SUDO_UID:-$(id -u)}" -g \#"${SUDO_GID:-$(id -g)}" -- \
-                             env $UNSET_SUDO_VARS -u VPN_NO_INFO_ON_SUDO -- "$@"
+    # was running as root originally, no need to use sudo
+    if [[ -z "${SUDO_UID:-}" ]] && [[ -z "${SUDO_GID:-}" ]]
+    then
+        ip netns exec "$NS_NAME" "$@"
+    # sudo'ed from a user, need to sudo back to the user
+    else
+        # hide SUDO_ env vars, if any, as some programs don't like being called via
+        # sudo (e.g. flatpak)
+        local UNSET_SUDO_VARS
+        UNSET_SUDO_VARS="$(sudo -E -u \#"${SUDO_UID:-$(id -u)}" -g \#"${SUDO_GID:-$(id -g)}" \
+                           env | grep '^SUDO_' | sed 's/=/\t/g' | awk '{ print "-u " $1 }' | tr '\n' ' ')"
+        # shellcheck disable=SC2086
+        ip netns exec "$NS_NAME" sudo -E -u \#"${SUDO_UID:-$(id -u)}" -g \#"${SUDO_GID:-$(id -g)}" -- \
+                                 env $UNSET_SUDO_VARS -u VPN_NO_INFO_ON_SUDO -- "$@"
+    fi
 }
 
 stat_() {
