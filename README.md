@@ -141,7 +141,7 @@ vpn up vpn7 region7 && trap "vpn down vpn7" EXIT && vpn exec vpn7 /bin/bash
 
 Then, after you are done, just `logout` 8 times, to get out of each bash session and trigger the set traps.
 
-Note thatwhen nesting past a few VPNs the connection becomes rather unstable, you might lose connection way before you get behind 7 proxies, so you might want to limit yourself it to just a few of them.
+Note that when nesting past a few VPNs the connection becomes rather unstable, you might lose connection way before you get behind 7 proxies, so you might want to limit yourself it to just a few of them.
 
 Also note that the following will NOT work [because of this](https://serverfault.com/a/961592), i.e. you need to keep a process in a network namespace for the nested namespaces to work, like what all these bash processes in the snippet above did:
 
