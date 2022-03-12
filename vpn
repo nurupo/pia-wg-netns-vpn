@@ -375,7 +375,7 @@ exec_() {
     # was running as root originally, no need to use sudo
     if [[ -z "${SUDO_UID:-}" ]] && [[ -z "${SUDO_GID:-}" ]]
     then
-        ip netns exec "$NS_NAME" "$@"
+        exec ip netns exec "$NS_NAME" "$@"
     # sudo'ed from a user, need to sudo back to the user
     else
         # hide SUDO_ env vars, if any, as some programs don't like being called via
@@ -384,8 +384,8 @@ exec_() {
         UNSET_SUDO_VARS="$(sudo -E -u \#"${SUDO_UID:-$(id -u)}" -g \#"${SUDO_GID:-$(id -g)}" \
                            env | grep '^SUDO_' | sed 's/=/\t/g' | awk '{ print "-u " $1 }' | tr '\n' ' ')"
         # shellcheck disable=SC2086
-        ip netns exec "$NS_NAME" sudo -E -u \#"${SUDO_UID:-$(id -u)}" -g \#"${SUDO_GID:-$(id -g)}" -- \
-                                 env $UNSET_SUDO_VARS -u VPN_NO_INFO_ON_SUDO -- "$@"
+        exec ip netns exec "$NS_NAME" sudo -E -u \#"${SUDO_UID:-$(id -u)}" -g \#"${SUDO_GID:-$(id -g)}" -- \
+                                      env $UNSET_SUDO_VARS -u VPN_NO_INFO_ON_SUDO -- "$@"
     fi
 }
 
@@ -483,8 +483,7 @@ auto_sudo() {
     if [[ "$(id -u)" != "0" ]]
     then
         # shellcheck disable=SC2086
-        sudo $SUDO_ARGS VPN_NO_INFO_ON_SUDO=1 "$BASH" -- "$0" "$@"
-        exit
+        exec sudo $SUDO_ARGS VPN_NO_INFO_ON_SUDO=1 "$BASH" -- "$0" "$@"
     fi
 }
 
