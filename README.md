@@ -41,10 +41,10 @@ sudo apt install bash-completion curl jq sudo wireguard-tools
 # this will create directory structure under /var/lib/vpn and prompt about missing deps
 vpn regions
 # setup other things
+sudo install -o root -g root -m 600 pia_ca.rsa.4096.crt /var/lib/vpn/secret/pia_ca.rsa.4096.crt
 sudo install -o root -g root -m 600 pia_auth.sh /var/lib/vpn/secret/pia_auth.sh
 # enter your username/password
 sudo editor /var/lib/vpn/secret/pia_auth.sh
-sudo install -o root -g root -m 600 pia_ca.rsa.4096.crt /var/lib/vpn/secret/pia_ca.rsa.4096.crt
 ```
 
 By default the script uses `/var/lib/vpn` for its purposes.
