@@ -209,7 +209,7 @@ down() {
     set -e
     if [[ "$PIDS_RET" -eq "0" ]] && [[ -n "$PIDS" ]]
     then
-        echo "The following processes are still running:"
+        echo "The following processes are still running in \"$NS_NAME\" network namespace and will lose the vpn connection:"
         while IFS= read -r PID
         do
             echo "$PID  $(ps -o command= -p "$PID")"
