@@ -23,4 +23,4 @@ declare -a VARS
 for VAR in $(env | sed 's/=/\t/g' | awk '{ print $1 }' | tr '\n' ' '); do
   VARS+=("$VAR=${!VAR}")
 done
-pkexec env -u PKEXEC_UID "SUDO_USER=$USER" "SUDO_UID=$(id -u)" "SUDO_GID=$(id -g)" "${VARS[@]}" "$@"
+exec pkexec env -u PKEXEC_UID "SUDO_USER=$USER" "SUDO_UID=$(id -u)" "SUDO_GID=$(id -g)" "${VARS[@]}" "$@"
